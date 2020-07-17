@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Quick gene lookup</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
+  
+  
+  <link href="https://unpkg.com/tabulator-tables@4.2.7/dist/css/bootstrap/tabulator_bootstrap4.min.css" rel="stylesheet">
+  <script type="text/javascript" src="https://unpkg.com/tabulator-tables@4.2.7/dist/js/tabulator.min.js"></script>
+</head>
+
+<body>
+
+
+<div class="container mt-3">
+
+  <div class="row mb-3">
+    <div class="col-12 col-md-3 themed-grid-col">
+      <div class="form-group">
+        <label for="textarea">Paste a list of genes:</label>
+        <textarea class="form-control" id="textarea" rows="5"></textarea>
+
+        <button id="button-search" type="button" class="btn btn-primary mt-2">Search</button>
+
+      </div>
+    </div>
+    <div class="col-12 col-md-9 themed-grid-col">
+
+      <label class="mr-sm-2" for="select-api">Choose an API:</label>
+      <select class="custom-select mr-sm-2" id="select-api">
+        <option value="ensembl">Ensembl</option>
+        <option value="mygene" selected>MyGene.info</option>
+      </select>
+
+      <div id="example-table" class="mt-3"></div>
+
+        <div class="progress mt-2">
+          <div id="progress-api" class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+        </div>
+
+      <div id="state" class="alert mt-2 mb-2"></div>
+
+      <button id="download-tsv" type="button" class="btn btn-primary">Download TSV</button>
+
+      
+
+    </div>
+  </div>
+
+</div>
+
+
+
+
+<script>
+
+var oldVal = "";
+var selected_api = "mygene";
+var x = null;
+
+var table = null;
+
+var state = {};
+
+
+
+
+
+
+var fileFormatter = function(columns, data, options, setFileContents){
+    
+    
+    
+    
+
+    
+    var titles = [];
+    var fields = [];
+    var delimiter = "\t";
+
+    columns.forEach(function(column){
+    	if(column.field){
+    		titles.push(column.title)
+    		fields.push(column.field)
+    	}
+    });
+
+    
+    var fileContents = [titles.join(delimiter)];
+
+    
+    data.data.forEach(function(row){
+
+    	var rowData = [];
+
+    	fields.forEach(function(field){
+    		rowData.push(row[field]);
+    	})
+
+    	fileContents.push(rowData.join(delimiter));
+
+    });
+
+		setFileContents(fileContents.join("\n"), "text/plain");
+}
+
+$("#download-tsv").click(function(){
+  table.download(fileFormatter, selected_api + "-data.tsv");
+});
+
+
+$("#button-search").on("click", function() {
+
+  var currentVal = $("#textarea").val();
+  
+  if (currentVal == oldVal) {
+    return; 
+  }
+
+  oldVal = currentVal;
+
+  
+  do_query(oldVal);
+});
+
+$("#select-api").on("change", function() {
+  selected_api = this.value;
+  do_query(oldVal);
+});
+
+var table = new Tabulator("#example-table", {
+  height: 300,
+  layout: "fitColumns",
+  layoutColumnsOnNewData: true,
+  
+  columns: [
+    {title:"query", field:"query"},
+    {title:"symbol", field:"symbol"},
+    {title:"id", field:"_id"},
+    {title:"name", field:"name", width: 200},
+    {title:"score", field:"_score"},
+    {title:"taxid", field:"taxid"}
+  ]
+});
+
+function do_query(q) {
+  if (selected_api === "mygene") {
+    query_mygene(q);
+  } else if (selected_api === "ensembl") {
+    query_ensembl(q);
+  }
+}
+
+function update_state() {
+  let progress = Math.round(
+    100 * state.n_received / state.n_queries
+  );
+  if (state.n_queries === state.n_received) {
+    var s = "Done. ";
+    $("#state").text(
+      s + state.n_queries + " queries, " + state.n_results + " results, " +
+      (state.n_queries - state.n_results) + ' not found'
+    );
+    $("#state")
+      .removeClass("alert-success")
+      .removeClass("alert-warning")
+      .removeClass("alert-info");
+    if (state.n_results == state.n_queries) {
+      $("#state").addClass("alert-success");
+    } else {
+      $("#state").addClass("alert-warning");
+    }
+  } else {
+    var s = "Loading. ";
+    $("#state").text(
+      s + state.n_queries + " queries, " + state.n_results + " results"
+    );
+    $("#state").addClass("alert-info");
+  }
+
+  $('#progress-api')
+    .attr('aria-valuenow', progress)
+    .css('width', progress + "%");
+}
+
+function parse_queries(s) {
+  var queries = s
+    .replace(/['"]/g, "")
+    .split(/[\r?\n ,]/)
+    .filter((d) => d !== "" && d !== "-");
+  return queries;
+}
+
+
+
+
+function query_mygene(q) {
+
+  var queries = parse_queries(q);
+
+  table = new Tabulator("#example-table", {
+    height: 300,
+    layout: "fitColumns",
+    layoutColumnsOnNewData: true,
+    
+    clipboardCopySelector:"table",
+    columns: [
+      {title:"order", field:"i", width: 90},
+      {title:"query", field:"query", width: 110},
+      {title:"symbol", field:"symbol", width: 110},
+      {title:"id", field:"_id", width: 110},
+      {title:"name", field:"name", width: 200},
+      {title:"score", field:"_score", width: 110},
+      {title:"taxid", field:"taxid", width: 110}
+    ]
+  });
+
+  state.n_queries = queries.length;
+  state.n_received = 0;
+  state.n_results = 0;
+  update_state();
+
+  var url = "https://mygene.info/v3/query";
+
+  var cb = function(i, query, data) {
+    state.n_received += 1;
+    x = data;
+    console.log(data);
+    if (data.max_score) {
+      var d = data.hits[0];
+      d.query = query;
+      d.i = i;
+      table.addData([d]);
+      state.n_results += 1;
+    } else {
+      var empty = {"i": i, "query": query, "symbol": "", "_id": "", "name": "", "_score": "", "taxid": ""};
+      table.addData([empty]);
+    }
+    table.setSort([{column: "i", dir: "asc"}]);
+    update_state();
+  };
+
+  for (let i = 0; i < queries.length; i++) {
+    var query = queries[i];
+    console.log(query);
+    $.getJSON(
+      url,
+      {"q": query, "species": "human"},
+      (data) => {
+        return cb(i + 1, queries[i], data);
+      }
+    );
+  }
+
+}
+
+function query_ensembl(q) {
+
+  var queries = parse_queries(q);
+
+  table = new Tabulator("#example-table", {
+    height: 300,
+    layout: "fitColumns",
+    layoutColumnsOnNewData: true,
+    columnMinWidth: 110,
+    columns: [
+      {title: "order", field: "i", width: 20},
+      {title:"query", field:"query"},
+      {title:"id", field:"id"},
+      {title:"type", field:"type"}
+    ]
+  });
+
+  state.n_queries = queries.length;
+  state.n_received = 0;
+  state.n_results = 0;
+  update_state();
+
+  
+  var url = "https://rest.ensembl.org/xrefs/symbol/homo_sapiens/";
+
+  var cb = function(i, query, data) {
+    x = data;
+    state.n_received += 1;
+    if (data.length) {
+      var d = data[0];
+      d.query = query;
+      d.i = i;
+      console.log(d);
+      table.addData([d]);
+      state.n_results += 1;
+    } else {
+      var empty = {"i": i, "query": query, "id": "", "type": ""};
+      table.addData([empty]);
+    }
+    table.setSort([{column: "i", dir: "asc"}]);
+    update_state();
+  };
+
+  for (let i = 0; i < queries.length; i++) {
+    var query = queries[i];
+    console.log(query);
+    $.getJSON(
+      url + query,
+      {"content-type": "application/json"},
+      (d) => {
+        return cb(i + 1, queries[i], d);
+      }
+    );
+  }
+
+}
+
+$("#textarea").val('STAT1 IRF8 ISG15 NEMO');
+
+oldVal = $("#textarea").val();
+
+do_query(oldVal);
+</script>
+
+</body>
+</html>
